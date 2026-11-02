@@ -22,8 +22,17 @@ string str(const rapidjson::Value &v) {
     return v.GetString();
 }
 
+TEST_CASE("buildWatchProjectCommand renders the watch-project verb and the workspace") {
+    auto d = parse(buildWatchProjectCommand("/repo/pay-server"));
+
+    REQUIRE(d.IsArray());
+    REQUIRE_EQ(d.Size(), 2);
+    CHECK_EQ(str(d[0]), "watch-project");
+    CHECK_EQ(str(d[1]), "/repo/pay-server");
+}
+
 TEST_CASE("buildSubscribeCommand renders the subscribe verb, root, name and file filter") {
-    auto d = parse(buildSubscribeCommand("/repo/pay-server", "ruby-typer-1", {"rb", "rbi"}, "", {}));
+    auto d = parse(buildSubscribeCommand("/repo/pay-server", "", "ruby-typer-1", {"rb", "rbi"}, "", {}));
 
     REQUIRE(d.IsArray());
     REQUIRE_EQ(d.Size(), 4);
@@ -37,6 +46,7 @@ TEST_CASE("buildSubscribeCommand renders the subscribe verb, root, name and file
     REQUIRE_EQ(options["fields"].Size(), 1);
     CHECK_EQ(str(options["fields"][0]), "name");
     CHECK_FALSE(options.HasMember("defer"));
+    CHECK_FALSE(options.HasMember("relative_root"));
 
     auto &expression = options["expression"];
     REQUIRE_EQ(expression.Size(), 4);
@@ -52,8 +62,16 @@ TEST_CASE("buildSubscribeCommand renders the subscribe verb, root, name and file
     CHECK_EQ(str(expression[3][1][1]), "**/.~tmp~/**");
 }
 
+TEST_CASE("buildSubscribeCommand subscribes below the watched root when given a relative root") {
+    auto d = parse(buildSubscribeCommand("/repo", "pay-server", "ruby-typer-1", {"rb"}, "", {}));
+
+    CHECK_EQ(str(d[1]), "/repo");
+    CHECK_EQ(str(d[3]["relative_root"]), "pay-server");
+    CHECK_EQ(d[3]["expression"].Size(), 4);
+}
+
 TEST_CASE("buildSubscribeCommand restricts to the namespace directory when one is given") {
-    auto d = parse(buildSubscribeCommand("/repo", "ruby-typer-1", {"rb"}, "pay-server", {}));
+    auto d = parse(buildSubscribeCommand("/repo", "", "ruby-typer-1", {"rb"}, "pay-server", {}));
 
     auto &expression = d[3]["expression"];
     REQUIRE_EQ(expression.Size(), 5);
@@ -62,7 +80,7 @@ TEST_CASE("buildSubscribeCommand restricts to the namespace directory when one i
 }
 
 TEST_CASE("buildSubscribeCommand defers on every configured pause state") {
-    auto d = parse(buildSubscribeCommand("/repo", "ruby-typer-1", {"rb"}, "", {"autogen-run", "rsync-update"}));
+    auto d = parse(buildSubscribeCommand("/repo", "", "ruby-typer-1", {"rb"}, "", {"autogen-run", "rsync-update"}));
 
     auto &options = d[3];
     REQUIRE(options.HasMember("defer"));

@@ -21,10 +21,9 @@ WatchmanProcess::WatchmanProcess(shared_ptr<spdlog::logger> logger, string_view 
                                  absl::Mutex &messageQueueMutex, absl::Notification &initializedNotification,
                                  shared_ptr<const LSPConfiguration> config, string_view watchmanNamespace)
     : logger(std::move(logger)), watchmanPath(string(watchmanPath)), workSpace(string(workSpace)),
-      extensions(std::move(extensions)),
-      thread(runInAThread("watchmanReader", std::bind(&WatchmanProcess::start, this))), messageQueue(messageQueue),
-      messageQueueMutex(messageQueueMutex), initializedNotification(initializedNotification), config(std::move(config)),
-      watchmanNamespace(watchmanNamespace) {}
+      extensions(std::move(extensions)), messageQueue(messageQueue), messageQueueMutex(messageQueueMutex),
+      initializedNotification(initializedNotification), config(std::move(config)), watchmanNamespace(watchmanNamespace),
+      thread(runInAThread("watchmanReader", std::bind(&WatchmanProcess::start, this))) {}
 
 WatchmanProcess::~WatchmanProcess() {
     exitWithCode(0, "");
@@ -41,25 +40,88 @@ template <typename F> void catchDeserializationError(spdlog::logger &logger, con
     }
 }
 
+// Declare one right after the `subprocess::Popen` it guards, so it only runs if construction
+// succeeded. It runs on every exit path out of that scope — normal return, break, or exception — so
+// the watchman child is always reaped before the thread returns.
+struct ShutdownGuard {
+    subprocess::Popen &p;
+    ~ShutdownGuard() noexcept {
+        shutdownWatchmanChild(p);
+    }
+};
+
+// Sends one command to the Watchman CLI. The CLI reads a single JSON value from stdin; the newline
+// marks where it ends for anything that reads the command line by line.
+void sendCommand(subprocess::Popen &p, spdlog::logger &logger, string command) {
+    logger.debug(command);
+    command += '\n';
+    p.send(command.c_str(), command.size());
+}
+
 } // namespace
+
+optional<WatchmanProcess::WatchedRoot> WatchmanProcess::watchProject(const string &workspace) {
+    auto p = subprocess::Popen({watchmanPath.c_str(), "-j", "--no-pretty"}, subprocess::output{subprocess::PIPE},
+                               subprocess::input{subprocess::PIPE});
+    ShutdownGuard shutdownGuard{p};
+
+    sendCommand(p, *logger, buildWatchProjectCommand(workspace));
+    // This CLI is not persistent: it answers the one command and exits.
+    p.close_input();
+
+    auto fd = fileno(p.output());
+    string buffer;
+    while (!isStopped()) {
+        errno = 0;
+        auto maybeLine = FileOps::readLineFromFd(fd, buffer);
+        if (maybeLine.result == FileOps::ReadResult::Timeout) {
+            // Watchman answers after its first crawl of the project, which can take a while.
+            continue;
+        }
+
+        string line;
+        if (maybeLine.result == FileOps::ReadResult::Success) {
+            line = move(*maybeLine.output);
+        } else if (errno == EINTR) {
+            continue;
+        } else if (!buffer.empty()) {
+            // The CLI exited after an answer that did not end with a newline.
+            line = move(buffer);
+        } else {
+            exitWithWatchmanError(
+                fmt::format("Watchman (`{} -j --no-pretty`) exited without answering `watch-project`.", watchmanPath));
+            return nullopt;
+        }
+
+        logger->debug(line);
+        rapidjson::MemoryPoolAllocator<> alloc;
+        rapidjson::Document d(&alloc);
+        if (d.Parse(line.c_str(), line.size()).HasParseError() || !d.IsObject()) {
+            exitWithWatchmanError(fmt::format("Watchman gave an unexpected answer to `watch-project`: `{}`", line));
+            return nullopt;
+        }
+        if (d.HasMember("error") && d["error"].IsString()) {
+            exitWithWatchmanError(fmt::format("Watchman could not watch `{}`: {}", workspace, d["error"].GetString()));
+            return nullopt;
+        }
+        if (!d.HasMember("watch") || !d["watch"].IsString()) {
+            exitWithWatchmanError(fmt::format("Watchman gave an unexpected answer to `watch-project`: `{}`", line));
+            return nullopt;
+        }
+
+        WatchedRoot watchedRoot{d["watch"].GetString(), ""};
+        if (d.HasMember("relative_path") && d["relative_path"].IsString()) {
+            watchedRoot.relativePath = d["relative_path"].GetString();
+        }
+        return watchedRoot;
+    }
+    return nullopt;
+}
 
 void WatchmanProcess::start() {
     auto mainPid = getpid();
     try {
         string subscriptionName = fmt::format("ruby-typer-{}", getpid());
-
-        auto p = subprocess::Popen({watchmanPath.c_str(), "-j", "-p", "--no-pretty"},
-                                   subprocess::output{subprocess::PIPE}, subprocess::input{subprocess::PIPE});
-
-        // Declared after `p` so it only runs if construction succeeded. Runs on every exit path
-        // out of this scope — normal return, break, or exception — so the watchman child is
-        // always reaped before this thread returns.
-        struct ShutdownGuard {
-            subprocess::Popen &p;
-            ~ShutdownGuard() noexcept {
-                shutdownWatchmanChild(p);
-            }
-        } shutdownGuard{p};
 
         string modifiedWorkspace = workSpace;
         if (!watchmanNamespace.empty()) {
@@ -90,13 +152,22 @@ void WatchmanProcess::start() {
             }
         }
 
+        auto watchedRoot = watchProject(modifiedWorkspace);
+        if (!watchedRoot.has_value()) {
+            ENFORCE(isStopped());
+            return;
+        }
+
         logger->debug("Starting monitoring path {} with watchman for files with extensions {}. Subscription id: {}",
                       modifiedWorkspace, fmt::join(extensions, ","), subscriptionName);
 
-        string subscribeCommand = buildSubscribeCommand(modifiedWorkspace, subscriptionName, extensions,
-                                                        watchmanNamespace, config->opts.watchmanPauseStateNames);
-        p.send(subscribeCommand.c_str(), subscribeCommand.size());
-        logger->debug(subscribeCommand);
+        auto p = subprocess::Popen({watchmanPath.c_str(), "-j", "-p", "--no-pretty"},
+                                   subprocess::output{subprocess::PIPE}, subprocess::input{subprocess::PIPE});
+        ShutdownGuard shutdownGuard{p};
+
+        sendCommand(p, *logger,
+                    buildSubscribeCommand(watchedRoot->root, watchedRoot->relativePath, subscriptionName, extensions,
+                                          watchmanNamespace, config->opts.watchmanPauseStateNames));
 
         auto file = p.output();
         auto fd = fileno(file);
@@ -163,6 +234,10 @@ void WatchmanProcess::start() {
                     auto stateLeave = sorbet::realmain::lsp::WatchmanStateLeave::fromJSONValue(d);
                     processStateLeave(move(stateLeave));
                 });
+            } else if (d.HasMember("error") && d["error"].IsString()) {
+                exitWithWatchmanError(fmt::format("Watchman could not subscribe to changes in `{}`: {}",
+                                                  watchedRoot->root, d["error"].GetString()));
+                break;
             } else if (!d.HasMember("subscribe")) {
                 // Something we don't understand yet.
                 logger->debug("Unknown Watchman response:\n{}", line);
@@ -171,13 +246,7 @@ void WatchmanProcess::start() {
     } catch (exception e) {
         // Ignore exceptions thrown on forked process.
         if (getpid() == mainPid) {
-            auto msg = fmt::format(
-                "Error running Watchman (with `{} -j -p --no-pretty`).\nWatchman is required for Sorbet to "
-                "detect changes to files made outside of your code editor.\nDon't need Watchman? Run Sorbet "
-                "with `--disable-watchman`.",
-                watchmanPath);
-            logger->error(msg);
-            exitWithCode(1, msg);
+            exitWithWatchmanError(fmt::format("Error running Watchman (with `{} -j`).", watchmanPath));
         } else {
             // The forked process failed to start, likely because Watchman wasn't found. Exit the process.
             exit(1);
@@ -190,6 +259,14 @@ void WatchmanProcess::start() {
 bool WatchmanProcess::isStopped() {
     absl::MutexLock lck(&mutex);
     return stopped;
+}
+
+void WatchmanProcess::exitWithWatchmanError(string_view problem) {
+    auto msg = fmt::format("{}\nWatchman is required for Sorbet to detect changes to files made outside of your code "
+                           "editor.\nDon't need Watchman? Run Sorbet with `--disable-watchman`.",
+                           problem);
+    logger->error(msg);
+    exitWithCode(1, msg);
 }
 
 void WatchmanProcess::exitWithCode(int code, const optional<string> &msg) {

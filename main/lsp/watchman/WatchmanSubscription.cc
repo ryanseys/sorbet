@@ -7,8 +7,19 @@ using namespace std;
 
 namespace sorbet::realmain::lsp::watchman {
 
-string buildSubscribeCommand(string_view root, string_view subscriptionName, const vector<string> &extensions,
-                             string_view watchmanNamespace, const vector<string> &deferStates) {
+string buildWatchProjectCommand(string_view workspace) {
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buffer);
+    w.StartArray();
+    w.String("watch-project");
+    w.String(workspace.data(), workspace.size());
+    w.EndArray();
+    return buffer.GetString();
+}
+
+string buildSubscribeCommand(string_view root, string_view relativeRoot, string_view subscriptionName,
+                             const vector<string> &extensions, string_view watchmanNamespace,
+                             const vector<string> &deferStates) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> w(buffer);
     {
@@ -19,6 +30,11 @@ string buildSubscribeCommand(string_view root, string_view subscriptionName, con
 
         {
             w.StartObject();
+
+            if (!relativeRoot.empty()) {
+                w.String("relative_root");
+                w.String(relativeRoot.data(), relativeRoot.size());
+            }
 
             w.String("expression");
             {

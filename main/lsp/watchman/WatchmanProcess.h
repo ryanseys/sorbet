@@ -25,7 +25,6 @@ private:
     const std::string watchmanPath;
     const std::string workSpace;
     const std::vector<std::string> extensions;
-    const std::unique_ptr<Joinable> thread;
     // Mutex that must be held before reading or writing stopped.
     absl::Mutex mutex;
     // If true, the process has been stopped.
@@ -36,13 +35,32 @@ private:
     absl::Notification &initializedNotification;
     const std::shared_ptr<const LSPConfiguration> config;
     std::string watchmanNamespace;
+    // The thread reads all of the members above, so it must be the last member: it starts after the
+    // others are initialized, and it is joined before they are destroyed.
+    const std::unique_ptr<Joinable> thread;
+
+    // The root that Watchman watches for the workspace, and the path of the workspace inside it.
+    struct WatchedRoot {
+        std::string root;
+        std::string relativePath;
+    };
 
     /**
      * Starts up a Watchman subprocess and begins processing file changes. Runs in a dedicated thread.
      */
     void start();
 
+    /**
+     * Asks Watchman to watch the project that contains `workspace`. If Watchman refuses, reports the
+     * problem, stops, and returns nullopt.
+     */
+    std::optional<WatchedRoot> watchProject(const std::string &workspace);
+
     void exitWithCode(int code, const std::optional<std::string> &);
+
+    // Without Watchman, Sorbet silently misses changes to files made outside of the editor, so an
+    // error from Watchman stops Sorbet with a message for the user.
+    void exitWithWatchmanError(std::string_view problem);
 
     bool isStopped();
 
