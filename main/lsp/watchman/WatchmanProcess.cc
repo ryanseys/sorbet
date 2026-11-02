@@ -57,7 +57,7 @@ void sendCommand(subprocess::Popen &p, spdlog::logger &logger, const string &com
 
 bool parseResponse(spdlog::logger &logger, const string &line, rapidjson::Document &d) {
     logger.debug(line);
-    if (d.Parse(line.c_str(), line.size()).HasParseError()) {
+    if (d.Parse(line.c_str(), line.size()).HasParseError() || !d.IsObject()) {
         logger.error("Error parsing Watchman response: `{}` is not a valid json object", line);
         return false;
     }
