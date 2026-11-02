@@ -236,6 +236,25 @@ TEST_CASE("Exit") {
     }
 }
 
+TEST_CASE("WatchmanStops") {
+    auto state = make_shared<TaskQueue>();
+    auto preprocessor = makePreprocessor(state);
+    absl::Mutex messageQueueMutex;
+    MessageQueueState messageQueue;
+    // WatchmanProcess::processExit leaves the message queue in this state.
+    messageQueue.terminate = true;
+    messageQueue.errorCode = 1;
+
+    {
+        // The destructor of the Joinable waits for the preprocessor thread to exit.
+        auto preprocessingThread = preprocessor.runPreprocessor(messageQueue, messageQueueMutex);
+    }
+
+    absl::MutexLock lck{state->getMutex()};
+    CHECK(state->isTerminated());
+    CHECK_EQ(state->getErrorCode(), 0);
+}
+
 TEST_CASE("Initialized") {
     auto state = make_shared<TaskQueue>();
     auto options = makeOptions("");
