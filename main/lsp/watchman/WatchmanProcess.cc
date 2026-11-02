@@ -80,14 +80,33 @@ optional<string> WatchmanProcess::readLine(int fd, string &buffer) {
     return nullopt;
 }
 
+void WatchmanProcess::watch(const string &root) {
+    auto p = subprocess::Popen({watchmanPath.c_str(), "-j", "--no-pretty"}, subprocess::output{subprocess::PIPE},
+                               subprocess::input{subprocess::PIPE});
+    ShutdownGuard shutdownGuard{p};
+    sendCommand(p, *logger, buildWatchCommand(root));
+    // Without `-p`, the CLI sends one response and exits.
+    p.close_input();
+
+    string buffer;
+    auto line = readLine(fileno(p.output()), buffer);
+    if (!line.has_value()) {
+        // Sorbet stopped, or the CLI sent no response, for example a --watchman-path wrapper that does not handle
+        // `watch`. In the second case, subscribe anyway: a directory that Watchman already watches needs no watch.
+        return;
+    }
+
+    rapidjson::MemoryPoolAllocator<> alloc;
+    rapidjson::Document d(&alloc);
+    if (parseResponse(*logger, *line, d) && d.HasMember("error") && d["error"].IsString()) {
+        logger->error("Watchman could not watch `{}`: {}", root, d["error"].GetString());
+    }
+}
+
 void WatchmanProcess::start() {
     auto mainPid = getpid();
     try {
         string subscriptionName = fmt::format("ruby-typer-{}", getpid());
-
-        auto p = subprocess::Popen({watchmanPath.c_str(), "-j", "-p", "--no-pretty"},
-                                   subprocess::output{subprocess::PIPE}, subprocess::input{subprocess::PIPE});
-        ShutdownGuard shutdownGuard{p};
 
         string modifiedWorkspace = workSpace;
         if (!watchmanNamespace.empty()) {
@@ -118,9 +137,17 @@ void WatchmanProcess::start() {
             }
         }
 
+        watch(modifiedWorkspace);
+        if (isStopped()) {
+            return;
+        }
+
         logger->debug("Starting monitoring path {} with watchman for files with extensions {}. Subscription id: {}",
                       modifiedWorkspace, fmt::join(extensions, ","), subscriptionName);
 
+        auto p = subprocess::Popen({watchmanPath.c_str(), "-j", "-p", "--no-pretty"},
+                                   subprocess::output{subprocess::PIPE}, subprocess::input{subprocess::PIPE});
+        ShutdownGuard shutdownGuard{p};
         sendCommand(p, *logger,
                     buildSubscribeCommand(modifiedWorkspace, subscriptionName, extensions, watchmanNamespace,
                                           config->opts.watchmanPauseStateNames));
@@ -179,7 +206,7 @@ void WatchmanProcess::start() {
         // Ignore exceptions thrown on forked process.
         if (getpid() == mainPid) {
             auto msg = fmt::format(
-                "Error running Watchman (with `{} -j -p --no-pretty`).\nWatchman is required for Sorbet to "
+                "Error running Watchman (`{}`).\nWatchman is required for Sorbet to "
                 "detect changes to files made outside of your code editor.\nDon't need Watchman? Run Sorbet "
                 "with `--disable-watchman`.",
                 watchmanPath);

@@ -47,6 +47,9 @@ private:
     // Returns the next line from a watchman CLI, or nullopt when the CLI closes its output or Sorbet stops.
     std::optional<std::string> readLine(int fd, std::string &buffer);
 
+    // Asks Watchman to watch `root`, because Watchman accepts a subscription only for a directory that it watches.
+    void watch(const std::string &root);
+
     void exitWithCode(int code, const std::optional<std::string> &);
 
     bool isStopped();

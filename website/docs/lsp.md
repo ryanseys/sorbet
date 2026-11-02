@@ -26,9 +26,7 @@ To get Sorbet working with watchman, there are three options:
 
 1.  Opt out of using watchman, with the `--disable-watchman` flag. Sorbet will only read files from disk at startup, and afterwards will only see contents of files that have been opened or changed in the editor.
 
-Note that watchman requires a project to be version controlled (e.g. have a `.git` folder in the project root) or have a `.watchmanconfig` file at the root of the project. Without one of these, watchman will not start successfully.
-
-"Why watchman?" See [A note on watchman](#a-note-on-watchman) below.
+Sorbet asks watchman to watch Sorbet's input directory. If that directory is inside a Git repository that watchman already watches, pass the directory's path in the repository with `--watchman-namespace` (for example, `--watchman-namespace=backend`). Then Sorbet watches the repository root, and watchman does not watch the same files twice. For the watchman settings that can refuse a watch, and for why Sorbet uses watchman, see [A note on watchman](#a-note-on-watchman) below.
 
 ### A single input directory
 
@@ -378,9 +376,9 @@ In setups like these, certain files in the codebase may not actually exist accor
 
 Sorbet may add support for LSP-powered file watching in the future (to make Sorbet easier to use when not using Sorbet over SSH like this). But as specified, the current protocol is not powerful enough to completely replace Sorbet's need for watchman.
 
-Also, watchman uses an algorithm to find the "project path" when setting up file watches. This algorithm is [described here](https://facebook.github.io/watchman/docs/cmd/watch-project#whats-a-project-path) in detail, but basically reduces to "there must be either a `.git`, `.hg`, `.svn`, or `.watchmanconfig` file in the watched folder or some parent folder." This list of project indicators is not configurable by Sorbet--it can only be configured globally for an entire machine. See [`root_files`](https://facebook.github.io/watchman/docs/config#root_files) and [Resolution / Scoping](https://facebook.github.io/watchman/docs/config#resolution--scoping) for more.
+Also, Sorbet uses the watchman [`watch`](https://facebook.github.io/watchman/docs/cmd/watch) command on Sorbet's input directory (on its Git root with `--watchman-namespace`). If the watchman configuration sets [`enforce_root_files`](https://facebook.github.io/watchman/docs/config#enforce_root_files), watchman only watches a directory that contains one of the [`root_files`](https://facebook.github.io/watchman/docs/config#root_files). By default, these are `.git`, `.hg`, `.svn`, and `.watchmanconfig`. Sorbet cannot change these settings. Only the global watchman configuration for the machine can change them. See [Resolution / Scoping](https://facebook.github.io/watchman/docs/config#resolution--scoping) for more.
 
-Thus, to use Sorbet with watchman in a project that does not use Git, create an empty `.watchmanconfig` file in the root of the project.
+Thus, with `enforce_root_files`, a project that does not use Git needs a `.watchmanconfig` file in Sorbet's input directory. Write `{}` in this file: watchman cannot read an empty `.watchmanconfig` file.
 
 [version 3.17]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#version_3_17_0
 [`initialize`]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#initialize
