@@ -247,6 +247,7 @@ optional<unique_ptr<core::GlobalState>> LSPLoop::runLSP(shared_ptr<LSPInput> inp
     auto preprocessingThread = preprocessor.runPreprocessor(messageQueue, messageQueueMutex);
 
     mainThreadId = this_thread::get_id();
+    int errorCode = 0;
     {
         // Ensure Watchman thread gets unstuck when thread exits prior to initialization.
         NotifyNotificationOnDestruction notify(initializedNotification);
@@ -259,10 +260,10 @@ optional<unique_ptr<core::GlobalState>> LSPLoop::runLSP(shared_ptr<LSPInput> inp
                 absl::MutexLock lck(taskQueue->getMutex(), absl::Condition(taskQueue.get(), &TaskQueue::ready));
                 ENFORCE(!taskQueue->isPaused());
                 if (taskQueue->isTerminated()) {
-                    if (taskQueue->getErrorCode() != 0) {
+                    errorCode = taskQueue->getErrorCode();
+                    if (errorCode != 0) {
                         // Abnormal termination. Exit immediately.
-                        typecheckerCoord.shutdown();
-                        throw EarlyReturnWithCode(taskQueue->getErrorCode());
+                        break;
                     } else if (taskQueue->tasks().empty()) {
                         // Normal termination. Wait until all pending requests finish.
                         break;
@@ -418,6 +419,11 @@ optional<unique_ptr<core::GlobalState>> LSPLoop::runLSP(shared_ptr<LSPInput> inp
 
     logger->debug("Processor terminating");
     auto gs = typecheckerCoord.shutdown();
+    if (errorCode != 0) {
+        // Like realmain, do not spend time to free the GlobalState.
+        intentionallyLeakMemory(gs.release());
+        throw EarlyReturnWithCode(errorCode);
+    }
     if (gs) {
         return gs;
     } else {
