@@ -26,7 +26,7 @@ To get Sorbet working with watchman, there are three options:
 
 1.  Opt out of using watchman, with the `--disable-watchman` flag. Sorbet will only read files from disk at startup, and afterwards will only see contents of files that have been opened or changed in the editor.
 
-Sorbet asks watchman to watch Sorbet's input directory. If that directory is inside a Git repository that watchman already watches, pass the directory's path in the repository with `--watchman-namespace` (for example, `--watchman-namespace=backend`). Then Sorbet watches the repository root, and watchman does not watch the same files twice. For the watchman settings that can refuse a watch, and for why Sorbet uses watchman, see [A note on watchman](#a-note-on-watchman) below.
+Sorbet asks watchman to watch Sorbet's input directory. If watchman refuses to watch it, Sorbet shows the error from watchman and exits. If that directory is inside a Git repository that watchman already watches, pass the directory's path in the repository with `--watchman-namespace` (for example, `--watchman-namespace=backend`). Then Sorbet watches the repository root, and watchman does not watch the same files twice. For the watchman settings that can refuse a watch, and for why Sorbet uses watchman, see [A note on watchman](#a-note-on-watchman) below.
 
 ### A single input directory
 

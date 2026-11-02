@@ -52,6 +52,9 @@ private:
 
     void exitWithCode(int code, const std::optional<std::string> &);
 
+    // Shows `problem` with advice about `--disable-watchman`, and stops Sorbet.
+    void exitWithWatchmanError(std::string_view problem);
+
     bool isStopped();
 
     void enqueueNotification(std::unique_ptr<NotificationMessage> notification);
