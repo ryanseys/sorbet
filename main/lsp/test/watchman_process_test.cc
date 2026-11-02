@@ -79,6 +79,14 @@ public:
         return queue.pendingRequests.empty();
     }
 
+    static bool waitForFile(const string &path) {
+        auto deadline = chrono::steady_clock::now() + chrono::seconds(10);
+        while (!FileOps::exists(path) && chrono::steady_clock::now() < deadline) {
+            this_thread::sleep_for(chrono::milliseconds(10));
+        }
+        return FileOps::exists(path);
+    }
+
     bool stopped() {
         absl::MutexLock lock(&mutex);
         return queue.terminate;
@@ -140,7 +148,7 @@ TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess watches the git root of a n
     CHECK_FALSE(stopped());
 }
 
-TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess stops reading Watchman output until LSP initializes") {
+TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess reads Watchman output while LSP initializes") {
     auto workspace = dir + "/project";
     FileOps::createDir(workspace);
     // The updates for these changes are more than a pipe holds.
@@ -153,9 +161,8 @@ TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess stops reading Watchman outp
 
     start(workspace);
 
-    // Sorbet does not read the updates, so the fake cannot send all of them.
-    this_thread::sleep_for(chrono::seconds(1));
-    CHECK_FALSE(FileOps::exists(state + "/sent"));
+    CHECK(waitForFile(state + "/sent"));
+    // Sorbet holds the changes until LSP initializes.
     CHECK(queueEmpty());
 
     initialized.Notify();

@@ -13,6 +13,7 @@ class WatchmanQueryResponse;
 class WatchmanStateEnter;
 class WatchmanStateLeave;
 class LSPConfiguration;
+class LSPMessage;
 class NotificationMessage;
 } // namespace sorbet::realmain::lsp
 
@@ -35,6 +36,8 @@ private:
     absl::Notification &initializedNotification;
     const std::shared_ptr<const LSPConfiguration> config;
     std::string watchmanNamespace;
+    // Notifications that wait for LSP to initialize. Only the Watchman thread uses them.
+    std::deque<std::unique_ptr<LSPMessage>> heldNotifications;
     // The thread uses all of the members above, so this member must be the last one. C++ initializes members in
     // declaration order and destroys them in reverse order.
     const std::unique_ptr<Joinable> thread;
@@ -55,6 +58,9 @@ private:
     bool isStopped();
 
     void enqueueNotification(std::unique_ptr<NotificationMessage> notification);
+
+    // Moves the held notifications to the message queue, in order, if LSP is initialized.
+    void releaseHeldNotifications();
 
     void processQueryResponse(std::unique_ptr<sorbet::realmain::lsp::WatchmanQueryResponse>);
 

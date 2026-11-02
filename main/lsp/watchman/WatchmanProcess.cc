@@ -76,6 +76,8 @@ optional<string> WatchmanProcess::readLine(int fd, string &buffer) {
         if (maybeLine.result == FileOps::ReadResult::ErrorOrEof && errno != EINTR) {
             return nullopt;
         }
+        // Do not let held notifications wait for the next Watchman event.
+        releaseHeldNotifications();
     }
     return nullopt;
 }
@@ -236,15 +238,23 @@ void WatchmanProcess::exitWithCode(int code, const optional<string> &msg) {
 }
 
 void WatchmanProcess::enqueueNotification(unique_ptr<NotificationMessage> notification) {
-    auto msg = make_unique<LSPMessage>(move(notification));
-    // Don't start enqueueing requests until LSP is initialized.
-    initializedNotification.WaitForNotification();
-    {
-        absl::MutexLock lck(&messageQueueMutex);
+    // Do not wait here for LSP to initialize. If this thread stops reading, the watchman CLI stops reading from the
+    // Watchman daemon, and the daemon disconnects the CLI after 60 seconds.
+    heldNotifications.push_back(make_unique<LSPMessage>(move(notification)));
+    releaseHeldNotifications();
+}
+
+void WatchmanProcess::releaseHeldNotifications() {
+    if (heldNotifications.empty() || !initializedNotification.HasBeenNotified()) {
+        return;
+    }
+    absl::MutexLock lck(&messageQueueMutex);
+    for (auto &msg : heldNotifications) {
         msg->tagNewRequest(*logger);
-        messageQueue.counters = mergeCounters(move(messageQueue.counters));
         messageQueue.pendingRequests.push_back(move(msg));
     }
+    heldNotifications.clear();
+    messageQueue.counters = mergeCounters(move(messageQueue.counters));
 }
 
 void WatchmanProcess::processQueryResponse(unique_ptr<WatchmanQueryResponse> response) {
