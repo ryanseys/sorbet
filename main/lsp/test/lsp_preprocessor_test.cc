@@ -252,7 +252,7 @@ TEST_CASE("WatchmanStops") {
 
     absl::MutexLock lck{state->getMutex()};
     CHECK(state->isTerminated());
-    CHECK_EQ(state->getErrorCode(), 0);
+    CHECK_EQ(state->getErrorCode(), 1);
 }
 
 TEST_CASE("Initialized") {

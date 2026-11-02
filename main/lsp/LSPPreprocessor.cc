@@ -403,6 +403,7 @@ unique_ptr<Joinable> LSPPreprocessor::runPreprocessor(MessageQueueState &message
                 // Only terminate once incoming queue is drained.
                 if (messageQueue.terminate && messageQueue.pendingRequests.empty()) {
                     config->logger->debug("Preprocessor terminating");
+                    this->exit(messageQueue.errorCode);
                     return;
                 }
                 msg = move(messageQueue.pendingRequests.front());
