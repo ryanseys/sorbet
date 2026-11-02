@@ -215,8 +215,7 @@ export class SorbetLanguageClient implements Disposable, ErrorHandler {
   }
 
   /**
-   * Runs a Sorbet process using the current active configuration. Debounced so that it runs
-   * Sorbet at most every MIN_TIME_BETWEEN_RETRIES_MS.
+   * Runs a Sorbet process using the current active configuration.
    */
   private startSorbetProcess(): Promise<ChildProcess> {
     this.context.log.info("Running Sorbet LSP.");

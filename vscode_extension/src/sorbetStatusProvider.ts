@@ -4,6 +4,32 @@ import { SorbetExtensionContext } from "./sorbetExtensionContext";
 import { RestartReason, ServerStatus, ShowOperationParams } from "./types";
 
 const MIN_TIME_BETWEEN_RETRIES_MS = 7000;
+const MAX_TIME_BETWEEN_RETRIES_MS = 300000;
+const QUICK_CRASH_MS = 30000;
+
+// Not WRAPPER_REFUSED_SPAWN: a wrapper script uses it to ask for a retry.
+const CRASH_REASONS: ReadonlySet<RestartReason> = new Set([
+  RestartReason.CRASH_EXT_ERROR,
+  RestartReason.CRASH_LC_CLOSED,
+  RestartReason.CRASH_LC_ERROR,
+  RestartReason.FORCIBLY_TERMINATED,
+]);
+
+/**
+ * Get the minimum time between Sorbet starts after a crash. Each process that
+ * crashes less than {@link QUICK_CRASH_MS} after it starts doubles the time, up
+ * to {@link MAX_TIME_BETWEEN_RETRIES_MS}. A process that runs longer resets it.
+ * @param retryDelayMs Minimum time between starts before the crash.
+ * @param uptimeMs Time from the start of the process to the crash.
+ */
+export function getNextRetryDelayMs(
+  retryDelayMs: number,
+  uptimeMs: number,
+): number {
+  return uptimeMs < QUICK_CRASH_MS
+    ? Math.min(retryDelayMs * 2, MAX_TIME_BETWEEN_RETRIES_MS)
+    : MIN_TIME_BETWEEN_RETRIES_MS;
+}
 
 export type StatusChangedEvent = {
   status: ServerStatus;
@@ -15,12 +41,15 @@ export class SorbetStatusProvider implements Disposable {
   private wrappedActiveLanguageClient?: SorbetLanguageClient;
   private readonly context: SorbetExtensionContext;
   private readonly disposables: Disposable[];
+  /** Ends the wait in startSorbet. Set only while startSorbet waits. */
+  private endRetryWait?: () => void;
   /** Mutex for startSorbet. Prevents us from starting multiple processes at once. */
   private isStarting: boolean;
   private lastSorbetRetryTime: number;
   private operationStack: ShowOperationParams[];
   private readonly onShowOperationEmitter: EventEmitter<ShowOperationParams>;
   private readonly onStatusChangedEmitter: EventEmitter<StatusChangedEvent>;
+  private retryDelayMs: number;
 
   constructor(context: SorbetExtensionContext) {
     this.context = context;
@@ -29,6 +58,7 @@ export class SorbetStatusProvider implements Disposable {
     this.operationStack = [];
     this.onShowOperationEmitter = new EventEmitter<ShowOperationParams>();
     this.onStatusChangedEmitter = new EventEmitter<StatusChangedEvent>();
+    this.retryDelayMs = MIN_TIME_BETWEEN_RETRIES_MS;
 
     this.disposables = [
       this.onShowOperationEmitter,
@@ -143,13 +173,13 @@ export class SorbetStatusProvider implements Disposable {
 
   /**
    * Restart Sorbet.
-   * @param reason Telemetry reason.
+   * @param reason Telemetry reason. Also decides if this start follows a crash.
    */
   public async restartSorbet(reason: RestartReason): Promise<void> {
     await this.stopSorbet(ServerStatus.RESTARTING);
     // `reason` is an enum type with a small and finite number of values.
     this.context.metrics.emitCountMetric(`restart.${reason}`, 1);
-    await this.startSorbet();
+    await this.startSorbet(CRASH_REASONS.has(reason));
   }
 
   /**
@@ -171,8 +201,17 @@ export class SorbetStatusProvider implements Disposable {
 
   /**
    * Start Sorbet.
+   * @param afterCrash Whether this start follows a crash. A quick crash makes
+   * the wait before the start longer.
    */
-  public async startSorbet(): Promise<void> {
+  public async startSorbet(afterCrash = false): Promise<void> {
+    if (!afterCrash && this.retryDelayMs > MIN_TIME_BETWEEN_RETRIES_MS) {
+      // Do not make the user wait for the crash backoff. Do not end a wait of
+      // MIN_TIME_BETWEEN_RETRIES_MS: it merges a burst of config changes.
+      this.retryDelayMs = MIN_TIME_BETWEEN_RETRIES_MS;
+      this.endRetryWait?.();
+    }
+
     if (this.isStarting) {
       this.context.log.trace("Ignored start request, already starting.");
       return;
@@ -185,17 +224,37 @@ export class SorbetStatusProvider implements Disposable {
       return;
     }
 
-    // Debounce by MIN_TIME_BETWEEN_RETRIES_MS. Returns 0 if the calculated time to sleep is negative.
-    const sleepMS =
-      MIN_TIME_BETWEEN_RETRIES_MS - (Date.now() - this.lastSorbetRetryTime);
+    const msSinceLastStart = Date.now() - this.lastSorbetRetryTime;
+    if (afterCrash) {
+      this.retryDelayMs = getNextRetryDelayMs(
+        this.retryDelayMs,
+        msSinceLastStart,
+      );
+    }
+
+    // Debounce by retryDelayMs. Returns 0 if the calculated time to sleep is negative.
+    const sleepMS = this.retryDelayMs - msSinceLastStart;
     if (sleepMS > 0) {
       // Wait timeToSleep ms. Use mutex, as this yields the event loop for future events.
-      this.context.log.debug(
+      this.context.log.info(
         `Waiting ${sleepMS.toFixed(0)}ms before restarting Sorbet…`,
       );
       this.isStarting = true;
-      await new Promise((res) => setTimeout(res, sleepMS));
+      await new Promise<void>((res) => {
+        const timer = setTimeout(res, sleepMS);
+        this.endRetryWait = () => {
+          clearTimeout(timer);
+          res();
+        };
+      });
+      this.endRetryWait = undefined;
       this.isStarting = false;
+      if (!this.context.configuration.activeLspConfig) {
+        this.context.log.info(
+          "Ignored start request, no active configuration.",
+        );
+        return;
+      }
     }
     this.lastSorbetRetryTime = Date.now();
 
@@ -237,6 +296,9 @@ export class SorbetStatusProvider implements Disposable {
    * @param newStatus Status to report.
    */
   public async stopSorbet(newStatus: ServerStatus): Promise<void> {
+    if (newStatus === ServerStatus.DISABLED) {
+      this.endRetryWait?.();
+    }
     // Use property-setter to ensure proper clean-up.
     this.activeLanguageClient = undefined;
     this.fireOnStatusChanged({ status: newStatus, stopped: true });
