@@ -44,6 +44,9 @@ private:
      */
     void start();
 
+    // Returns the next line from a watchman CLI, or nullopt when the CLI closes its output or Sorbet stops.
+    std::optional<std::string> readLine(int fd, std::string &buffer);
+
     void exitWithCode(int code, const std::optional<std::string> &);
 
     bool isStopped();

@@ -40,7 +40,45 @@ template <typename F> void catchDeserializationError(spdlog::logger &logger, con
     }
 }
 
+// Declare it right after the `Popen` that it guards, so it only runs if construction succeeded. Runs on every exit
+// path out of that scope — normal return, break, or exception — so the watchman child is always reaped before the
+// thread returns.
+struct ShutdownGuard {
+    subprocess::Popen &p;
+    ~ShutdownGuard() noexcept {
+        shutdownWatchmanChild(p);
+    }
+};
+
+void sendCommand(subprocess::Popen &p, spdlog::logger &logger, const string &command) {
+    p.send(command.c_str(), command.size());
+    logger.debug(command);
+}
+
+bool parseResponse(spdlog::logger &logger, const string &line, rapidjson::Document &d) {
+    logger.debug(line);
+    if (d.Parse(line.c_str(), line.size()).HasParseError()) {
+        logger.error("Error parsing Watchman response: `{}` is not a valid json object", line);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
+
+optional<string> WatchmanProcess::readLine(int fd, string &buffer) {
+    while (!isStopped()) {
+        errno = 0;
+        auto maybeLine = FileOps::readLineFromFd(fd, buffer);
+        if (maybeLine.result == FileOps::ReadResult::Success) {
+            return move(maybeLine.output);
+        }
+        if (maybeLine.result == FileOps::ReadResult::ErrorOrEof && errno != EINTR) {
+            return nullopt;
+        }
+    }
+    return nullopt;
+}
 
 void WatchmanProcess::start() {
     auto mainPid = getpid();
@@ -49,16 +87,7 @@ void WatchmanProcess::start() {
 
         auto p = subprocess::Popen({watchmanPath.c_str(), "-j", "-p", "--no-pretty"},
                                    subprocess::output{subprocess::PIPE}, subprocess::input{subprocess::PIPE});
-
-        // Declared after `p` so it only runs if construction succeeded. Runs on every exit path
-        // out of this scope — normal return, break, or exception — so the watchman child is
-        // always reaped before this thread returns.
-        struct ShutdownGuard {
-            subprocess::Popen &p;
-            ~ShutdownGuard() noexcept {
-                shutdownWatchmanChild(p);
-            }
-        } shutdownGuard{p};
+        ShutdownGuard shutdownGuard{p};
 
         string modifiedWorkspace = workSpace;
         if (!watchmanNamespace.empty()) {
@@ -92,44 +121,21 @@ void WatchmanProcess::start() {
         logger->debug("Starting monitoring path {} with watchman for files with extensions {}. Subscription id: {}",
                       modifiedWorkspace, fmt::join(extensions, ","), subscriptionName);
 
-        string subscribeCommand = buildSubscribeCommand(modifiedWorkspace, subscriptionName, extensions,
-                                                        watchmanNamespace, config->opts.watchmanPauseStateNames);
-        p.send(subscribeCommand.c_str(), subscribeCommand.size());
-        logger->debug(subscribeCommand);
+        sendCommand(p, *logger,
+                    buildSubscribeCommand(modifiedWorkspace, subscriptionName, extensions, watchmanNamespace,
+                                          config->opts.watchmanPauseStateNames));
 
-        auto file = p.output();
-        auto fd = fileno(file);
-
+        auto fd = fileno(p.output());
         string buffer;
-
-        while (!isStopped()) {
-            errno = 0;
-            auto maybeLine = FileOps::readLineFromFd(fd, buffer);
-            if (maybeLine.result == FileOps::ReadResult::Timeout) {
-                // Timeout occurred. See if we should abort before reading further.
+        while (auto maybeLine = readLine(fd, buffer)) {
+            const string &line = *maybeLine;
+            rapidjson::MemoryPoolAllocator<> alloc;
+            rapidjson::Document d(&alloc);
+            if (!parseResponse(*logger, line, d)) {
                 continue;
             }
 
-            if (maybeLine.result == FileOps::ReadResult::ErrorOrEof) {
-                if (errno == EINTR) {
-                    continue;
-                }
-
-                // Exit loop; unable to read from Watchman process.
-                exitWithCode(1, nullopt);
-                break;
-            }
-
-            ENFORCE(maybeLine.result == FileOps::ReadResult::Success);
-
-            const string &line = *maybeLine.output;
-            // Line found!
-            rapidjson::MemoryPoolAllocator<> alloc;
-            rapidjson::Document d(&alloc);
-            logger->debug(line);
-            if (d.Parse(line.c_str(), line.size()).HasParseError()) {
-                logger->error("Error parsing Watchman response: `{}` is not a valid json object", line);
-            } else if (d.HasMember("is_fresh_instance")) {
+            if (d.HasMember("is_fresh_instance")) {
                 catchDeserializationError(*logger, line, [&d, this]() {
                     auto queryResponse = sorbet::realmain::lsp::WatchmanQueryResponse::fromJSONValue(d);
                     if (!watchmanNamespace.empty()) {
@@ -167,6 +173,8 @@ void WatchmanProcess::start() {
                 logger->debug("Unknown Watchman response:\n{}", line);
             }
         }
+        // The CLI closed its output. If Sorbet already stopped, this does nothing.
+        exitWithCode(1, nullopt);
     } catch (exception e) {
         // Ignore exceptions thrown on forked process.
         if (getpid() == mainPid) {
