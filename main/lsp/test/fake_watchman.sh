@@ -4,7 +4,8 @@
 #
 # $FAKE_WATCHMAN_STATE is a directory with these files:
 #   watched  The fake adds each directory that it watches to this file, one on each line.
-#   changes  Optional. The files that the first update after a subscription reports, one on each line.
+#   changes  Optional. The files that change after a subscription, one on each line. Each file has a separate update.
+#   sent     The fake creates this file after it sends the updates.
 set -euo pipefail
 
 state="$FAKE_WATCHMAN_STATE"
@@ -50,17 +51,18 @@ if [[ "$command" =~ $subscribe ]]; then
   if ! grep -qxF "$root" "$state/watched" 2> /dev/null; then
     error "watchman::RootResolveError: failed to resolve root: unable to resolve root $root: failed to resolve root: directory $root is not watched"
   else
-    files=""
-    if [ -f "$state/changes" ]; then
-      while IFS= read -r file || [ -n "$file" ]; do
-        files="$files${files:+,}$(json_string "$file")"
-      done < "$state/changes"
-    fi
-
     root="$(json_string "$root")"
     echo "{\"version\":\"fake\",\"subscribe\":$name,\"clock\":\"c:0:1\"}"
     echo "{\"version\":\"fake\",\"subscription\":$name,\"root\":$root,\"clock\":\"c:0:1\",\"files\":[],\"is_fresh_instance\":true,\"unilateral\":true}"
-    echo "{\"version\":\"fake\",\"subscription\":$name,\"root\":$root,\"clock\":\"c:0:2\",\"files\":[$files],\"is_fresh_instance\":false,\"unilateral\":true}"
+    if [ -f "$state/changes" ]; then
+      while IFS= read -r file || [ -n "$file" ]; do
+        # Call json_string directly. A subshell for each file makes many updates slow.
+        printf '{"version":"fake","subscription":%s,"root":%s,"clock":"c:0:2","files":[' "$name" "$root"
+        json_string "$file"
+        echo '],"is_fresh_instance":false,"unilateral":true}'
+      done < "$state/changes"
+    fi
+    touch "$state/sent"
   fi
 
   # Keep stdout open until Sorbet closes stdin, so that Sorbet does not see the CLI exit.

@@ -1,5 +1,6 @@
 #include "doctest/doctest.h"
 // has to go first as it violates our requirements
+#include "absl/strings/str_join.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 #include "common/FileOps.h"
@@ -11,9 +12,11 @@
 #include "main/lsp/json_types.h"
 #include "main/lsp/watchman/WatchmanProcess.h"
 #include "spdlog/sinks/null_sink.h"
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace std;
@@ -32,6 +35,8 @@ public:
     absl::Mutex mutex;
     MessageQueueState queue;
     absl::Notification initialized;
+    // If false, LSP does not initialize until the test notifies `initialized`.
+    bool initializeOnStart = true;
     unique_ptr<WatchmanProcess> process;
 
     FakeWatchmanTest() {
@@ -41,7 +46,6 @@ public:
         state = dir + "/state";
         FileOps::createDir(state);
         setenv("FAKE_WATCHMAN_STATE", state.c_str(), 1);
-        initialized.Notify();
     }
 
     ~FakeWatchmanTest() {
@@ -52,6 +56,9 @@ public:
     }
 
     void start(const string &workspace, const string &watchmanNamespace = "") {
+        if (initializeOnStart) {
+            initialized.Notify();
+        }
         auto logger = make_shared<spdlog::logger>("console", make_shared<spdlog::sinks::null_sink_mt>());
         opts.rawInputDirNames.emplace_back(workspace);
         auto config = make_shared<LSPConfiguration>(opts, output, logger, false);
@@ -60,14 +67,16 @@ public:
                                                watchmanNamespace);
     }
 
-    vector<string> waitForChangedFiles() {
+    vector<string> waitForChangedFiles(size_t count = 1) {
         absl::MutexLock lock(&mutex);
-        mutex.AwaitWithTimeout(
-            absl::Condition(
-                +[](MessageQueueState *queue) -> bool { return queue->terminate || !changedFiles(*queue).empty(); },
-                &queue),
-            absl::Seconds(10));
+        auto ready = [this, count]() { return queue.terminate || changedFiles(queue).size() >= count; };
+        mutex.AwaitWithTimeout(absl::Condition(&ready), absl::Seconds(10));
         return changedFiles(queue);
+    }
+
+    bool queueEmpty() {
+        absl::MutexLock lock(&mutex);
+        return queue.pendingRequests.empty();
     }
 
     bool stopped() {
@@ -128,6 +137,30 @@ TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess watches the git root of a n
 
     // Sorbet removes the namespace from the names of the changed files.
     CHECK_EQ(waitForChangedFiles(), vector<string>{"foo.rb"});
+    CHECK_FALSE(stopped());
+}
+
+TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess stops reading Watchman output until LSP initializes") {
+    auto workspace = dir + "/project";
+    FileOps::createDir(workspace);
+    // The updates for these changes are more than a pipe holds.
+    vector<string> changes;
+    for (int i = 0; i < 1000; i++) {
+        changes.emplace_back(fmt::format("file{}.rb", i));
+    }
+    FileOps::write(state + "/changes", absl::StrJoin(changes, "\n"));
+    initializeOnStart = false;
+
+    start(workspace);
+
+    // Sorbet does not read the updates, so the fake cannot send all of them.
+    this_thread::sleep_for(chrono::seconds(1));
+    CHECK_FALSE(FileOps::exists(state + "/sent"));
+    CHECK(queueEmpty());
+
+    initialized.Notify();
+
+    CHECK_EQ(waitForChangedFiles(changes.size()), changes);
     CHECK_FALSE(stopped());
 }
 
