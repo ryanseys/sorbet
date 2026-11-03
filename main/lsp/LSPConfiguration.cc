@@ -19,6 +19,14 @@ constexpr string_view httpsScheme = "https"sv;
 
 namespace {
 
+[[noreturn]] void rejectOptions(LSPOutput &output, spdlog::logger &logger, const string &msg) {
+    logger.error(msg);
+    auto params = make_unique<ShowMessageParams>(MessageType::Error, msg);
+    output.write(
+        make_unique<LSPMessage>(make_unique<NotificationMessage>("2.0", LSPMethod::WindowShowMessage, move(params))));
+    throw EarlyReturnWithCode(1);
+}
+
 string getRootPath(LSPOutput &output, const options::Options &opts, spdlog::logger &logger) {
     if (opts.rawInputDirNames.empty() ||
         (opts.rawInputDirNames.size() > 1 && !opts.forciblySilenceLspMultipleDirError)) {
@@ -27,11 +35,12 @@ string getRootPath(LSPOutput &output, const options::Options &opts, spdlog::logg
                          : "Sorbet's language server requires a single input directory.";
         msg += fmt::format(" However, {} are configured: [{}]", opts.rawInputDirNames.size(),
                            absl::StrJoin(opts.rawInputDirNames, ", "));
-        logger.error(msg);
-        auto params = make_unique<ShowMessageParams>(MessageType::Error, msg);
-        output.write(make_unique<LSPMessage>(
-            make_unique<NotificationMessage>("2.0", LSPMethod::WindowShowMessage, move(params))));
-        throw EarlyReturnWithCode(1);
+        rejectOptions(output, logger, msg);
+    }
+    if (!opts.disableWatchman && !opts.rawInputFileNames.empty()) {
+        rejectOptions(output, logger,
+                      "Watchman support does not accept input files. If Watchman is not needed, run Sorbet with "
+                      "`--disable-watchman`.");
     }
     return opts.rawInputDirNames.at(0);
 }

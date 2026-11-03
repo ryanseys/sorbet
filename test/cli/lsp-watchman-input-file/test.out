@@ -1,0 +1,4 @@
+Watchman support does not accept input files. If Watchman is not needed, run Sorbet with `--disable-watchman`.
+Content-Length: 190
+
+{"jsonrpc":"2.0","method":"window/showMessage","params":{"type":1,"message":"Watchman support does not accept input files. If Watchman is not needed, run Sorbet with `--disable-watchman`."}}
