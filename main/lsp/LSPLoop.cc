@@ -74,21 +74,6 @@ void LSPLoop::sendCountersToStatsd(chrono::time_point<chrono::steady_clock> curr
     }
 }
 
-namespace {
-class NotifyNotificationOnDestruction {
-    absl::Notification &notification;
-
-public:
-    NotifyNotificationOnDestruction(absl::Notification &notif) : notification(notif) {};
-    ~NotifyNotificationOnDestruction() {
-        if (!notification.HasBeenNotified()) {
-            notification.Notify();
-        }
-    }
-};
-
-} // namespace
-
 void LSPLoop::processRequest(const string &json) {
     vector<unique_ptr<LSPMessage>> messages;
     messages.push_back(LSPMessage::fromClient(json));
@@ -248,8 +233,6 @@ optional<unique_ptr<core::GlobalState>> LSPLoop::runLSP(shared_ptr<LSPInput> inp
 
     mainThreadId = this_thread::get_id();
     {
-        // Ensure Watchman thread gets unstuck when thread exits prior to initialization.
-        NotifyNotificationOnDestruction notify(initializedNotification);
         // Ensure preprocessor, reader, and watchman threads get unstuck when thread exits.
         MessageQueueState::NotifyOnDestruction notifyIncoming(messageQueue, messageQueueMutex);
         while (true) {
