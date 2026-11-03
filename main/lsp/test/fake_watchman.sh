@@ -3,8 +3,11 @@
 # directory that it does not watch.
 #
 # $FAKE_WATCHMAN_STATE is a directory with these files:
-#   watched  The fake adds each directory that it watches to this file, one on each line.
-#   changes  Optional. The files that the first update after a subscription reports, one on each line.
+#   watched         The fake adds each directory that it watches to this file, one on each line.
+#   changes         Optional. The files that the first update after a subscription reports, one on each line.
+#   refuse_watch    Optional. The watch command fails with the error in this file.
+#   forget_watches  Optional. If present, the fake forgets each watch, as if `watchman watch-del` ran after it.
+#   cancel          Optional. If present, the fake cancels the subscription after the first update.
 set -euo pipefail
 
 state="$FAKE_WATCHMAN_STATE"
@@ -33,8 +36,14 @@ if [[ "$command" =~ $watch ]]; then
     error "fake_watchman.sh: watch expects the arguments -j --no-pretty, not: $*"
     exit 1
   fi
+  if [ -f "$state/refuse_watch" ]; then
+    error "$(cat "$state/refuse_watch")"
+    exit 1
+  fi
 
-  echo "$root" >> "$state/watched"
+  if [ ! -f "$state/forget_watches" ]; then
+    echo "$root" >> "$state/watched"
+  fi
   echo "{\"version\":\"fake\",\"watcher\":\"fake\",\"watch\":$(json_string "$root")}"
   exit 0
 fi
@@ -61,6 +70,9 @@ if [[ "$command" =~ $subscribe ]]; then
     echo "{\"version\":\"fake\",\"subscribe\":$name,\"clock\":\"c:0:1\"}"
     echo "{\"version\":\"fake\",\"subscription\":$name,\"root\":$root,\"clock\":\"c:0:1\",\"files\":[],\"is_fresh_instance\":true,\"unilateral\":true}"
     echo "{\"version\":\"fake\",\"subscription\":$name,\"root\":$root,\"clock\":\"c:0:2\",\"files\":[$files],\"is_fresh_instance\":false,\"unilateral\":true}"
+    if [ -f "$state/cancel" ]; then
+      echo "{\"version\":\"fake\",\"unilateral\":true,\"canceled\":true,\"subscription\":$name,\"root\":$root}"
+    fi
   fi
 
   # Keep stdout open until Sorbet closes stdin, so that Sorbet does not see the CLI exit.

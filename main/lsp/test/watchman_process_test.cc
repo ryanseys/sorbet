@@ -32,6 +32,7 @@ public:
     absl::Mutex mutex;
     MessageQueueState queue;
     absl::Notification initialized;
+    string watchmanPath = "main/lsp/test/fake_watchman.sh";
     unique_ptr<WatchmanProcess> process;
 
     FakeWatchmanTest() {
@@ -55,9 +56,8 @@ public:
         auto logger = make_shared<spdlog::logger>("console", make_shared<spdlog::sinks::null_sink_mt>());
         opts.rawInputDirNames.emplace_back(workspace);
         auto config = make_shared<LSPConfiguration>(opts, output, logger, false);
-        process = make_unique<WatchmanProcess>(logger, "main/lsp/test/fake_watchman.sh", workspace,
-                                               vector<string>{"rb", "rbi"}, queue, mutex, initialized, config,
-                                               watchmanNamespace);
+        process = make_unique<WatchmanProcess>(logger, watchmanPath, workspace, vector<string>{"rb", "rbi"}, queue,
+                                               mutex, initialized, config, watchmanNamespace);
     }
 
     vector<string> waitForChangedFiles() {
@@ -87,6 +87,17 @@ public:
             }
         }
         return messages;
+    }
+
+    void checkStoppedWithError(string_view problem) {
+        {
+            absl::MutexLock lock(&mutex);
+            REQUIRE(mutex.AwaitWithTimeout(absl::Condition(&queue.terminate), absl::Seconds(10)));
+        }
+        auto errors = errorsShownToUser();
+        REQUIRE_EQ(errors.size(), 1);
+        CHECK_NE(errors[0].find(problem), string::npos);
+        CHECK_NE(errors[0].find("--disable-watchman"), string::npos);
     }
 
 private:
@@ -129,6 +140,47 @@ TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess watches the git root of a n
     // Sorbet removes the namespace from the names of the changed files.
     CHECK_EQ(waitForChangedFiles(), vector<string>{"foo.rb"});
     CHECK_FALSE(stopped());
+}
+
+TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess stops Sorbet when Watchman cannot watch the input directory") {
+    auto workspace = dir + "/project";
+    FileOps::createDir(workspace);
+    FileOps::write(state + "/refuse_watch", "None of the files listed in global config root_files are present and "
+                                            "enforce_root_files is set to true.");
+
+    start(workspace);
+
+    checkStoppedWithError("None of the files listed in global config root_files are present");
+}
+
+TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess stops Sorbet when Watchman refuses the subscription") {
+    auto workspace = dir + "/project";
+    FileOps::createDir(workspace);
+    FileOps::write(state + "/forget_watches", "");
+
+    start(workspace);
+
+    checkStoppedWithError("is not watched");
+}
+
+TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess stops Sorbet when Watchman cancels the subscription") {
+    auto workspace = dir + "/project";
+    FileOps::createDir(workspace);
+    FileOps::write(state + "/cancel", "");
+
+    start(workspace);
+
+    checkStoppedWithError("Watchman canceled the subscription");
+}
+
+TEST_CASE_FIXTURE(FakeWatchmanTest, "WatchmanProcess stops Sorbet when it cannot run Watchman") {
+    auto workspace = dir + "/project";
+    FileOps::createDir(workspace);
+    watchmanPath = dir + "/no-such-watchman";
+
+    start(workspace);
+
+    checkStoppedWithError("execve failed");
 }
 
 } // namespace sorbet::realmain::lsp::watchman::test

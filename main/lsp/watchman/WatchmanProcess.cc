@@ -99,7 +99,7 @@ void WatchmanProcess::watch(const string &root) {
     rapidjson::MemoryPoolAllocator<> alloc;
     rapidjson::Document d(&alloc);
     if (parseResponse(*logger, *line, d) && d.HasMember("error") && d["error"].IsString()) {
-        logger->error("Watchman could not watch `{}`: {}", root, d["error"].GetString());
+        exitWithWatchmanError(fmt::format("Watchman could not watch `{}`: {}", root, d["error"].GetString()));
     }
 }
 
@@ -195,23 +195,27 @@ void WatchmanProcess::start() {
                     auto stateLeave = sorbet::realmain::lsp::WatchmanStateLeave::fromJSONValue(d);
                     processStateLeave(move(stateLeave));
                 });
+            } else if (d.HasMember("error") && d["error"].IsString()) {
+                exitWithWatchmanError(fmt::format("Watchman could not subscribe to changes in `{}`: {}",
+                                                  modifiedWorkspace, d["error"].GetString()));
+                break;
+            } else if (d.HasMember("canceled") && d["canceled"].IsBool() && d["canceled"].GetBool()) {
+                // Watchman sends no more changes, but the CLI keeps running.
+                exitWithWatchmanError(fmt::format(
+                    "Watchman canceled the subscription to changes in `{}`, for example after `watchman watch-del`.",
+                    modifiedWorkspace));
+                break;
             } else if (!d.HasMember("subscribe")) {
                 // Something we don't understand yet.
                 logger->debug("Unknown Watchman response:\n{}", line);
             }
         }
-        // The CLI closed its output. If Sorbet already stopped, this does nothing.
+        // The CLI closed its output, or Sorbet already stopped. In the second case, this does nothing.
         exitWithCode(1, nullopt);
-    } catch (exception e) {
+    } catch (const exception &e) {
         // Ignore exceptions thrown on forked process.
         if (getpid() == mainPid) {
-            auto msg = fmt::format(
-                "Error running Watchman (`{}`).\nWatchman is required for Sorbet to "
-                "detect changes to files made outside of your code editor.\nDon't need Watchman? Run Sorbet "
-                "with `--disable-watchman`.",
-                watchmanPath);
-            logger->error(msg);
-            exitWithCode(1, msg);
+            exitWithWatchmanError(fmt::format("Error running Watchman (`{}`): {}", watchmanPath, e.what()));
         } else {
             // The forked process failed to start, likely because Watchman wasn't found. Use _exit: exit runs static
             // destructors and flushes stdio, which can wait forever for a lock that another thread held at the fork.
@@ -225,6 +229,14 @@ void WatchmanProcess::start() {
 bool WatchmanProcess::isStopped() {
     absl::MutexLock lck(&mutex);
     return stopped;
+}
+
+void WatchmanProcess::exitWithWatchmanError(string_view problem) {
+    auto msg = fmt::format("{}\nWatchman is required for Sorbet to detect changes to files made outside of your code "
+                           "editor.\nDon't need Watchman? Run Sorbet with `--disable-watchman`.",
+                           problem);
+    logger->error(msg);
+    exitWithCode(1, msg);
 }
 
 void WatchmanProcess::exitWithCode(int code, const optional<string> &msg) {
