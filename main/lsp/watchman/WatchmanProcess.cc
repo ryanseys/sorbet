@@ -178,8 +178,9 @@ void WatchmanProcess::start() {
             logger->error(msg);
             exitWithCode(1, msg);
         } else {
-            // The forked process failed to start, likely because Watchman wasn't found. Exit the process.
-            exit(1);
+            // The forked process failed to start, likely because Watchman wasn't found. Use _exit: exit runs static
+            // destructors and flushes stdio, which can wait forever for a lock that another thread held at the fork.
+            _exit(1);
         }
     }
 
