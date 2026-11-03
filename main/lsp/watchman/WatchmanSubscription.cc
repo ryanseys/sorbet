@@ -7,6 +7,16 @@ using namespace std;
 
 namespace sorbet::realmain::lsp::watchman {
 
+string buildWatchCommand(string_view root) {
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buffer);
+    w.StartArray();
+    w.String("watch");
+    w.String(root.data(), root.size());
+    w.EndArray();
+    return buffer.GetString();
+}
+
 string buildSubscribeCommand(string_view root, string_view subscriptionName, const vector<string> &extensions,
                              string_view watchmanNamespace, const vector<string> &deferStates) {
     rapidjson::StringBuffer buffer;
@@ -85,8 +95,8 @@ string buildSubscribeCommand(string_view root, string_view subscriptionName, con
                 w.EndArray();
             }
 
-            // Note 2: `empty_on_fresh_instance` prevents Watchman from sending entire contents of folder if this
-            // subscription starts the daemon / causes the daemon to watch this folder for the first time.
+            // Note 2: `empty_on_fresh_instance` prevents Watchman from sending entire contents of folder in the first
+            // result of this subscription.
             w.String("empty_on_fresh_instance");
             w.Bool(true);
 

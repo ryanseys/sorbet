@@ -22,6 +22,15 @@ string str(const rapidjson::Value &v) {
     return v.GetString();
 }
 
+TEST_CASE("buildWatchCommand renders the watch verb and the root") {
+    auto d = parse(buildWatchCommand("/repo/pay-server"));
+
+    REQUIRE(d.IsArray());
+    REQUIRE_EQ(d.Size(), 2);
+    CHECK_EQ(str(d[0]), "watch");
+    CHECK_EQ(str(d[1]), "/repo/pay-server");
+}
+
 TEST_CASE("buildSubscribeCommand renders the subscribe verb, root, name and file filter") {
     auto d = parse(buildSubscribeCommand("/repo/pay-server", "ruby-typer-1", {"rb", "rbi"}, "", {}));
 
